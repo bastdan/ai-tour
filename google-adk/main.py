@@ -3,12 +3,13 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from google.adk.agents import Agent
 from google.adk.models import Gemini
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from google.genai.errors import APIError
+
+from agents.connection_test import build_agent
+from runner import build_runner
 
 
 def load_environment() -> tuple[str, str]:
@@ -22,33 +23,19 @@ def load_environment() -> tuple[str, str]:
     return model_name, api_key
 
 
-def main() -> None:
+def build_base_model() -> Gemini:
     model_name, api_key = load_environment()
-    model = Gemini(
+    return Gemini(
         model=model_name,
         client_kwargs={"api_key": api_key, "enterprise": False},
     )
-    agent = Agent(
-        name="connection_test",
-        model=model,
-        instruction="Answer briefly and follow the user's request.",
-        generate_content_config=types.GenerateContentConfig(
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            http_options=types.HttpOptions(timeout=60_000),
-        ),
-    )
-    runner = Runner(
-        agent=agent,
-        app_name="connection_test",
-        session_service=InMemorySessionService(),
-        auto_create_session=True,
-    )
-    prompt = "Reply with exactly: Google ADK connection successful."
-    print(f"Model: {model_name}\nPrompt: {prompt}")
+
+
+def run_prompt(runner: Runner, prompt: str, *, user_id: str, session_id: str) -> str:
     response = ""
     for event in runner.run(
-        user_id="test_user",
-        session_id="test_session",
+        user_id=user_id,
+        session_id=session_id,
         new_message=types.Content(role="user", parts=[types.Part(text=prompt)]),
     ):
         if event.error_code:
@@ -60,6 +47,21 @@ def main() -> None:
             ).strip()
     if not response:
         raise RuntimeError("Google ADK returned no final text response.")
+    return response
+
+
+def main() -> None:
+    model = build_base_model()
+    agent = build_agent(model)
+    runner = build_runner(agent)
+    prompt = "Reply with exactly: Google ADK connection successful."
+    print(f"Model: {model.model}\nPrompt: {prompt}")
+    response = run_prompt(
+        runner,
+        prompt,
+        user_id="test_user",
+        session_id="test_session",
+    )
     print(f"Response: {response}")
 
 
