@@ -1,12 +1,12 @@
-from google.adk.agents import Agent
+from google.adk import Workflow
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 
 
-def build_runner(agent: Agent) -> Runner:
+def build_runner(workflow: Workflow) -> Runner:
     return Runner(
-        agent=agent,
-        app_name="connection_test",
+        node=workflow,
+        app_name="trip_planner",
         session_service=InMemorySessionService(),
         auto_create_session=True,
     )
