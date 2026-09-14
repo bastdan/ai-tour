@@ -4,7 +4,8 @@ from google.genai import types
 
 
 def build_agent(model: Gemini) -> Agent:
-    return Agent(
+    # ADK's Agent inherits ABC but has no abstract methods and is instantiable.
+    return Agent(  # pyright: ignore[reportEmptyAbstractUsage]
         name="connection_test",
         model=model,
         instruction="Answer briefly and follow the user's request.",

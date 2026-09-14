@@ -1,0 +1,6 @@
+{
+  "include": ["google-adk"],
+  "venvPath": "google-adk",
+  "venv": ".venv",
+  "executionEnvironments": [{ "root": "google-adk" }]
+}

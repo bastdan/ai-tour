@@ -13,13 +13,11 @@ from runner import build_runner
 
 
 def load_environment() -> tuple[str, str]:
-    load_dotenv(Path(__file__).resolve().with_name(".env"))
+    _ = load_dotenv(Path(__file__).resolve().with_name(".env"))
     model_name = os.getenv("GOOGLE_MODEL", "").strip()
     api_key = os.getenv("GOOGLE_API_KEY", "").strip()
-    if not model_name:
-        raise ValueError("Set GOOGLE_MODEL in .env (for example, gemini-flash-latest).")
-    if not api_key or api_key == "<your-value>":
-        raise ValueError("Set GOOGLE_API_KEY in .env to your Google AI Studio API key.")
+    if not model_name or not api_key or api_key == "<your-value>":
+        raise ValueError("Set valid GOOGLE_MODEL and GOOGLE_API_KEY values in .env.")
     return model_name, api_key
 
 
@@ -70,7 +68,7 @@ if __name__ == "__main__":
         main()
     except APIError as exc:
         print(
-            f"Google API request failed (HTTP {exc.code}). "
+            f"Google API request failed (HTTP {exc.code}).",
             "Check your API key, model access, and quota.",
             file=sys.stderr,
         )
