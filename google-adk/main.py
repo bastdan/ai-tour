@@ -1,6 +1,5 @@
 import os
 import sys
-from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -10,36 +9,17 @@ from google.adk.runners import Runner
 from google.genai import types
 from google.genai.errors import APIError
 
-from agents.common import grounding_sources, text_content
+from model.trip_request import TripRequest
 from runner import build_runner
+from utils import format_source_links, grounding_sources, parse_iso_date, text_content
 from workflow import build_workflow
-
-
-@dataclass(frozen=True)
-class TripRequest:
-    origin: str
-    destination: str
-    departure_date: date
-    return_date: date
-    today: date
-
-    def to_state(self) -> dict[str, str]:
-        return {
-            "origin": self.origin,
-            "destination": self.destination,
-            "departure_date": self.departure_date.isoformat(),
-            "return_date": self.return_date.isoformat(),
-            "today": self.today.isoformat(),
-        }
 
 
 def read_date(label: str, *, default: date, earliest: date) -> date:
     while True:
         value = input(f"{label} (YYYY-MM-DD) [{default.isoformat()}]: ").strip()
         try:
-            parsed = date.fromisoformat(value) if value else default
-            if value and parsed.isoformat() != value:
-                raise ValueError("Use YYYY-MM-DD.")
+            parsed = parse_iso_date(value) if value else default
         except ValueError:
             print("Enter a valid date in YYYY-MM-DD format.")
             continue
@@ -122,9 +102,7 @@ def run_prompt(
     if not response:
         raise RuntimeError("The plan writer returned no final text response.")
     if sources:
-        response += "\n\n## Sources\n" + "\n".join(
-            f"- [{title}]({url})" for url, title in sources.items()
-        )
+        response += "\n\n## Sources\n" + format_source_links(sources)
     return response
 
 

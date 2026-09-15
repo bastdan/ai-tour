@@ -14,9 +14,10 @@ from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 from pydantic import PrivateAttr
 
-from agents.common import text_content
-from main import TripRequest, read_trip, run_prompt
+from main import read_trip, run_prompt
+from model.trip_request import TripRequest
 from runner import build_runner
+from utils import text_content
 from workflow import build_workflow
 
 TODAY = date(2026, 9, 14)
