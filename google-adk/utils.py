@@ -1,12 +1,7 @@
-from collections.abc import Mapping
-from datetime import date
+import re
+import unicodedata
 
 from google.genai import types
-
-
-def has_http_scheme(url: str) -> bool:
-    """Check for an HTTP(S) prefix without validating the full URL."""
-    return url.startswith(("https://", "http://"))
 
 
 def text_content(content: types.Content | None) -> str:
@@ -17,25 +12,33 @@ def text_content(content: types.Content | None) -> str:
     ).strip()
 
 
-def grounding_sources(metadata: types.GroundingMetadata | None) -> dict[str, str]:
-    sources: dict[str, str] = {}
-    if metadata:
-        for chunk in metadata.grounding_chunks or []:
-            if chunk.web and chunk.web.uri:
-                url = chunk.web.uri
-                if has_http_scheme(url):
-                    sources[url] = chunk.web.title or url
-    return sources
+def one_line(text: str) -> str:
+    """Collapse whitespace and limit a console detail to 120 characters."""
+    collapsed = " ".join(text.split())
+    return collapsed[:120] + "…" if len(collapsed) > 120 else collapsed
 
 
-def format_source_links(sources: Mapping[str, str]) -> str:
-    """Format source links as Markdown bullets in mapping order."""
-    return "\n".join(f"- [{title}]({url})" for url, title in sources.items())
+def first_line(text: str) -> str:
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
 
 
-def parse_iso_date(value: str) -> date:
-    """Parse a date in strict YYYY-MM-DD format."""
-    parsed = date.fromisoformat(value)
-    if parsed.isoformat() != value:
-        raise ValueError("Use YYYY-MM-DD.")
-    return parsed
+def title_slug(story: str) -> str:
+    """Make a safe, short filename component from the Product Owner's title."""
+    match = re.search(r"^Title:[ \t]*(.*)$", story, flags=re.MULTILINE)
+    title = match.group(1) if match else ""
+    title = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return slug[:60].rstrip("-") or "specification"
+
+
+def validate_headings(document: str, template: str) -> None:
+    """Reject missing, reordered, duplicate or additional level-two headings."""
+    expected = [line for line in template.splitlines() if line.startswith("## ")]
+    actual = [line for line in document.splitlines() if line.startswith("## ")]
+    for index, heading in enumerate(expected):
+        if index >= len(actual) or actual[index] != heading:
+            raise RuntimeError(f"Missing or reordered specification heading: {heading}")
+    if len(actual) > len(expected):
+        raise RuntimeError(f"Unexpected specification heading: {actual[len(expected)]}")
+    if not document.startswith("# Specification:"):
+        raise RuntimeError("The specification must start with '# Specification:'.")

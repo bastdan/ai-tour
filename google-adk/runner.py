@@ -6,7 +6,7 @@ from google.adk.sessions import InMemorySessionService
 def build_runner(workflow: Workflow) -> Runner:
     return Runner(
         node=workflow,
-        app_name="trip_planner",
+        app_name="spec_writer",
         session_service=InMemorySessionService(),
         auto_create_session=True,
     )
