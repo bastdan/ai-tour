@@ -5,12 +5,13 @@ import re
 import tempfile
 import unittest
 from collections.abc import AsyncGenerator
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from dataclasses import FrozenInstanceError
 from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from google.adk.models import Gemini
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
@@ -221,12 +222,16 @@ class InputTests(TemporaryProjectTests):
 
 class WorkflowTests(TemporaryProjectTests):
     def run_spec(self, model: ScriptedModel) -> tuple[str, str]:
+        async def run() -> str:
+            async with build_runner(build_workflow(model)) as runner:
+                return await run_prompt(
+                    runner, "Write the specification.", request=self.request,
+                    user_id="test_user", session_id="test_session",
+                )
+
         output = io.StringIO()
         with redirect_stdout(output):
-            document = run_prompt(
-                build_runner(build_workflow(model)), "Write the specification.",
-                request=self.request, user_id="test_user", session_id="test_session",
-            )
+            document = asyncio.run(run())
         return document, output.getvalue()
 
     def test_chain_dialogue_state_tools_and_logs(self) -> None:
@@ -310,12 +315,18 @@ class WorkflowTests(TemporaryProjectTests):
 
     def test_budgets_reset_on_a_second_run_in_same_session(self) -> None:
         model = ScriptedModel(model="gemini-flash-latest", po_questions=6)
-        runner = build_runner(build_workflow(model))
-        for _ in range(2):
-            with redirect_stdout(io.StringIO()) as output:
-                run_prompt(runner, "Write a specification.", request=self.request,
-                           user_id="test_user", session_id="test_session")
-            self.assertEqual(output.getvalue().count("Budget spent:"), 1)
+
+        async def run_twice() -> None:
+            async with build_runner(build_workflow(model)) as runner:
+                for _ in range(2):
+                    with redirect_stdout(io.StringIO()) as output:
+                        await run_prompt(
+                            runner, "Write a specification.", request=self.request,
+                            user_id="test_user", session_id="test_session",
+                        )
+                    self.assertEqual(output.getvalue().count("Budget spent:"), 1)
+
+        asyncio.run(run_twice())
         self.assertEqual(model.trace.count("product_owner_clarifier:done"), 10)
 
     def test_log_details_are_bounded_and_completed_is_one_line(self) -> None:
@@ -355,13 +366,22 @@ class WorkflowTests(TemporaryProjectTests):
                 self.run_spec(ScriptedModel(model="gemini-flash-latest", document=document))
 
     def test_story_is_persisted_in_session(self) -> None:
-        runner = build_runner(build_workflow(ScriptedModel(model="gemini-flash-latest")))
+        async def run() -> None:
+            model = ScriptedModel(model="gemini-flash-latest")
+            async with build_runner(build_workflow(model)) as runner:
+                await run_prompt(
+                    runner, "Write it.", request=self.request,
+                    user_id="u", session_id="s",
+                )
+                session = await runner.session_service.get_session(
+                    app_name="spec_writer", user_id="u", session_id="s"
+                )
+                self.assertIsNotNone(session)
+                assert session is not None
+                self.assertEqual(session.state["story"], STORY)
+
         with redirect_stdout(io.StringIO()):
-            run_prompt(runner, "Write it.", request=self.request, user_id="u", session_id="s")
-        session = asyncio.run(runner.session_service.get_session(app_name="spec_writer", user_id="u", session_id="s"))
-        self.assertIsNotNone(session)
-        assert session is not None
-        self.assertEqual(session.state["story"], STORY)
+            asyncio.run(run())
 
 
 class OutputTests(TemporaryProjectTests):
@@ -370,7 +390,7 @@ class OutputTests(TemporaryProjectTests):
         output_dir = self.base / "specs"
         output = io.StringIO()
         with patch("main.build_base_model", return_value=model), patch("main.OUTPUT_DIR", output_dir), patch.dict(os.environ, {"PROJECT_PATH": str(self.project)}), patch("builtins.input", side_effect=[self.request.need, ""]), redirect_stdout(output):
-            main()
+            asyncio.run(main())
         paths = list(output_dir.glob("*.md"))
         self.assertEqual(len(paths), 1)
         self.assertRegex(paths[0].name, r"^\d{8}-\d{4}-header-validation\.md$")
@@ -406,6 +426,130 @@ class OutputTests(TemporaryProjectTests):
         with patch("main.OUTPUT_DIR", output), self.assertRaisesRegex(RuntimeError, "analysed project"):
             save_specification(DOCUMENT, story=STORY, request=self.request, now=datetime.now())
         self.assertEqual(list(self.project.glob("*.md")), [])
+
+
+class ShutdownTests(TemporaryProjectTests):
+    def check_shutdown(
+        self,
+        *,
+        failure: bool = False,
+        invalid_document: bool = False,
+        cancelled: bool = False,
+        runner_close_failure: bool = False,
+    ) -> None:
+        """Exercise real SDK cleanup with scripted requests and no network."""
+        model = Gemini(
+            model="gemini-flash-latest",
+            client_kwargs={"api_key": "offline-test-key", "enterprise": False},
+        )
+        client = model.api_client
+        scripted = ScriptedModel(
+            model=model.model,
+            failure="product_owner" if failure else None,
+            document=DOCUMENT.replace("## Scope\n", "") if invalid_document else DOCUMENT,
+        )
+        runner = build_runner(build_workflow(model))
+        close_runner = runner.close
+        close_async_client = client.aio.aclose
+        close_sync_client = client.close
+        request_loops: list[asyncio.AbstractEventLoop] = []
+        cleanup: list[str] = []
+        output = io.StringIO()
+        main_task: asyncio.Task[None] | None = None
+
+        async def run_main() -> None:
+            nonlocal main_task
+            main_task = asyncio.current_task()
+            await main()
+
+        async def generate(
+            current_model: Gemini,
+            llm_request: LlmRequest,
+            stream: bool = False,
+        ) -> AsyncGenerator[LlmResponse, None]:
+            self.assertIs(current_model.api_client, client)
+            request_loops.append(asyncio.get_running_loop())
+            if cancelled:
+                assert main_task is not None
+                main_task.cancel()
+                await asyncio.sleep(0)
+                raise asyncio.CancelledError()
+            async for response in scripted.generate_content_async(llm_request, stream):
+                yield response
+
+        def record_cleanup(name: str) -> None:
+            self.assertTrue(request_loops)
+            self.assertIs(asyncio.get_running_loop(), request_loops[0])
+            self.assertFalse(request_loops[0].is_closed())
+            self.assertNotIn("Saved:", output.getvalue())
+            cleanup.append(name)
+
+        async def finish_runner() -> None:
+            record_cleanup("runner")
+            await close_runner()
+            if runner_close_failure:
+                raise RuntimeError("Runner cleanup failed")
+
+        async def finish_async_client() -> None:
+            record_cleanup("async client")
+            await close_async_client()
+
+        def finish_sync_client() -> None:
+            record_cleanup("sync client")
+            close_sync_client()
+
+        expected_error = None
+        if failure:
+            expected_error = self.assertRaisesRegex(RuntimeError, "product_owner")
+        elif invalid_document:
+            expected_error = self.assertRaisesRegex(RuntimeError, "## Scope")
+        elif cancelled:
+            expected_error = self.assertRaises(asyncio.CancelledError)
+        elif runner_close_failure:
+            expected_error = self.assertRaisesRegex(RuntimeError, "Runner cleanup failed")
+
+        with (
+            patch("main.build_base_model", return_value=model),
+            patch("main.build_runner", return_value=runner),
+            patch("main.OUTPUT_DIR", self.base / "specs"),
+            patch("builtins.input", side_effect=[self.request.need, str(self.project)]),
+            patch.object(Gemini, "generate_content_async", new=generate),
+            patch.object(runner, "close", side_effect=finish_runner),
+            patch.object(client.aio, "aclose", side_effect=finish_async_client),
+            patch.object(client, "close", side_effect=finish_sync_client),
+            redirect_stdout(output),
+            self.assertLogs("google_adk", level="WARNING")
+            if failure or cancelled else nullcontext(),
+            expected_error or nullcontext(),
+        ):
+            asyncio.run(run_main())
+
+        self.assertEqual(cleanup, ["runner", "async client", "sync client"])
+        self.assertTrue(all(loop is request_loops[0] for loop in request_loops))
+        self.assertTrue(request_loops[0].is_closed())
+        if expected_error:
+            self.assertNotIn("Saved:", output.getvalue())
+        else:
+            self.assertIn("Saved:", output.getvalue().splitlines()[-1])
+            self.assertEqual(set(scripted.requests), {
+                "product_owner", "tech_lead", "documentation",
+                "product_owner_clarifier", "implementation_plan",
+            })
+
+    def test_clients_close_on_request_loop_before_saved(self) -> None:
+        self.check_shutdown()
+
+    def test_clients_close_after_model_failure(self) -> None:
+        self.check_shutdown(failure=True)
+
+    def test_clients_close_after_validation_failure(self) -> None:
+        self.check_shutdown(invalid_document=True)
+
+    def test_clients_close_after_cancellation(self) -> None:
+        self.check_shutdown(cancelled=True)
+
+    def test_clients_close_even_if_runner_cleanup_fails(self) -> None:
+        self.check_shutdown(runner_close_failure=True)
 
 
 class TextHelperTests(unittest.TestCase):

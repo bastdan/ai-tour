@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+from contextlib import AsyncExitStack
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -69,7 +70,7 @@ def build_base_model() -> Gemini:
     )
 
 
-def run_prompt(
+async def run_prompt(
     runner: Runner,
     prompt: str,
     *,
@@ -81,7 +82,7 @@ def run_prompt(
     completed: set[str] = set()
     error: str | None = None
     try:
-        for event in runner.run(
+        async for event in runner.run_async(
             user_id=user_id,
             session_id=session_id,
             new_message=types.Content(role="user", parts=[types.Part(text=prompt)]),
@@ -131,24 +132,33 @@ def save_specification(
     return path
 
 
-def main() -> None:
+async def main() -> None:
     model = build_base_model()
     request = read_request(today=datetime.now(timezone.utc).astimezone().date())
-    runner = build_runner(build_workflow(model))
-    print(f"Project: {request.project_name} ({request.project_path})", flush=True)
-    print(f"Model: {model.model}\n", flush=True)
-    user_id, session_id = "spec_author", "spec_session"
-    response = run_prompt(
-        runner,
-        "Write a technical specification for the change described in the supplied need.",
-        request=request,
-        user_id=user_id,
-        session_id=session_id,
-    )
-    session = asyncio.run(runner.session_service.get_session(
-        app_name=runner.app_name, user_id=user_id, session_id=session_id
-    ))
-    story = str(session.state.get("story", "")) if session else ""
+    async with AsyncExitStack() as resources:
+        if isinstance(model, Gemini):
+            # Runner.close() does not own the shared model's HTTP clients.
+            # Close both clients while the loop that served their requests lives.
+            client = model.api_client
+            resources.callback(client.close)
+            await resources.enter_async_context(client.aio)
+        runner = await resources.enter_async_context(
+            build_runner(build_workflow(model))
+        )
+        print(f"Project: {request.project_name} ({request.project_path})", flush=True)
+        print(f"Model: {model.model}\n", flush=True)
+        user_id, session_id = "spec_author", "spec_session"
+        response = await run_prompt(
+            runner,
+            "Write a technical specification for the change described in the supplied need.",
+            request=request,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        session = await runner.session_service.get_session(
+            app_name=runner.app_name, user_id=user_id, session_id=session_id
+        )
+        story = str(session.state.get("story", "")) if session else ""
     path = save_specification(
         response, story=story, request=request, now=datetime.now().astimezone()
     )
@@ -158,7 +168,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     try:
-        main()
+        asyncio.run(main())
     except APIError as exc:
         print(
             f"Google API request failed (HTTP {exc.code}).",
